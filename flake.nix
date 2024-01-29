@@ -17,7 +17,10 @@
 
       perSystem = {pkgs, ...}: {
         devenv.shells.default = {
-          packages = [pkgs.elixir];
+          packages = [
+            pkgs.elixir
+            pkgs.mosquitto
+          ];
         };
       };
     };

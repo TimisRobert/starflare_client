@@ -11,6 +11,8 @@ defmodule StarflareClient.Transport do
               {:ok, socket :: :inet.socket() | :ssl.sslsocket()}
               | {:error, :timeout | :inet.posix()}
 
+  @callback close(socket :: :inet.socket() | :ssl.sslsocket()) :: :ok
+
   @callback send(socket :: :inet.socket() | :ssl.sslsocket(), data :: iodata()) ::
               :ok | {:error, {:timeout, binary()} | :inet.posix()}
 
