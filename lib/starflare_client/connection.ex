@@ -62,17 +62,7 @@ defmodule StarflareClient.Connection do
     {:keep_state_and_data, {:state_timeout, :timer.seconds(5), :disconnect}}
   end
 
-  def handle_event(:enter, :connecting, {:connected, :normal}, data) do
-    %__MODULE__{connect: connect} = data
-    {:keep_state_and_data, {:timeout, :timer.seconds(connect.keep_alive), :ping}}
-  end
-
-  def handle_event(:enter, {:connected, :normal}, {:connected, :normal}, data) do
-    %__MODULE__{connect: connect} = data
-    {:keep_state_and_data, {:timeout, :timer.seconds(connect.keep_alive), :ping}}
-  end
-
-  def handle_event(:enter, {:connected, :heartbeat}, {:connected, :normal}, data) do
+  def handle_event(:enter, _, _, data) do
     %__MODULE__{connect: connect} = data
     {:keep_state_and_data, {:timeout, :timer.seconds(connect.keep_alive), :ping}}
   end
@@ -138,7 +128,6 @@ defmodule StarflareClient.Connection do
         handle_packets(packets, state, %{data | buffer: [], buffer_size: 0})
 
       {:error, :incomplete_packet, packets, size} ->
-        IO.puts("here")
         packet_size = byte_size(packet)
         buffer_size = packet_size + buffer_size
 
@@ -187,7 +176,7 @@ defmodule StarflareClient.Connection do
 
     case packet_identifiers do
       [] ->
-        {:keep_state_and_data, {:reply, from, {:error, :no_identifiers_available}}}
+        {:next_state, {:connected, :out_of_identifiers}, data, :postpone}
 
       [packet_identifier | packet_identifiers] ->
         :ets.insert_new(tracking_table, {packet_identifier, from})
@@ -210,8 +199,13 @@ defmodule StarflareClient.Connection do
     handle_packets(packets, state, data, [])
   end
 
-  defp handle_packets([], _state, data, actions) do
-    {:repeat_state, data, Enum.reverse(actions)}
+  defp handle_packets([], state, data, actions) do
+    actions = Enum.reverse(actions)
+
+    case state do
+      {:connected, :normal} -> {:repeat_state, data, actions}
+      {:connected, :out_of_identifiers} -> {:next_state, {:connected, :normal}, data, actions}
+    end
   end
 
   defp handle_packets([packet | tail], state, data, actions) do
@@ -259,7 +253,7 @@ defmodule StarflareClient.Connection do
     {:error, :protocol_error}
   end
 
-  defp handle_packet(%ControlPacket.Puback{} = puback, {:connected, :normal}, data) do
+  defp handle_packet(%ControlPacket.Puback{} = puback, {:connected, _}, data) do
     %ControlPacket.Puback{
       packet_identifier: packet_identifier,
       reason_code: _reason_code
@@ -276,7 +270,7 @@ defmodule StarflareClient.Connection do
     {:ok, data, {:reply, from, :ok}}
   end
 
-  defp handle_packet(%ControlPacket.Pubrec{} = pubrec, {:connected, :normal}, data) do
+  defp handle_packet(%ControlPacket.Pubrec{} = pubrec, {:connected, _}, data) do
     %ControlPacket.Pubrec{
       packet_identifier: packet_identifier,
       reason_code: _reason_code
@@ -296,7 +290,7 @@ defmodule StarflareClient.Connection do
     end
   end
 
-  defp handle_packet(%ControlPacket.Pubcomp{} = pubcomp, {:connected, :normal}, data) do
+  defp handle_packet(%ControlPacket.Pubcomp{} = pubcomp, {:connected, _}, data) do
     %ControlPacket.Pubcomp{
       packet_identifier: packet_identifier,
       reason_code: _reason_code
