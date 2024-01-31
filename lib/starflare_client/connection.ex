@@ -11,6 +11,7 @@ defmodule StarflareClient.Connection do
             socket: nil,
             transport: nil,
             buffer: [],
+            buffer_size: 0,
             packet_identifiers: [],
             tracking_table: nil
 
@@ -23,7 +24,7 @@ defmodule StarflareClient.Connection do
     data = %__MODULE__{
       connect: connect,
       transport: transport,
-      host: to_charlist(host),
+      host: host,
       port: port
     }
 
@@ -123,18 +124,31 @@ defmodule StarflareClient.Connection do
   end
 
   def handle_event(:info, {:tcp, socket, packet}, state, %{socket: socket} = data) do
-    %__MODULE__{buffer: buffer, transport: transport, socket: socket} = data
+    %__MODULE__{
+      buffer: buffer,
+      buffer_size: buffer_size,
+      transport: transport,
+      socket: socket
+    } = data
 
     transport.setopts(socket, active: :once)
 
     case ControlPacket.decode_buffer([buffer | [packet]]) do
-      {:ok, packets} ->
-        handle_packets(packets, state, %{data | buffer: []})
+      {:ok, packets, _} ->
+        handle_packets(packets, state, %{data | buffer: [], buffer_size: 0})
 
-      {:error, :incomplete_packet, packets} ->
-        handle_packets(packets, state, %{data | buffer: [packet]})
+      {:error, :incomplete_packet, packets, size} ->
+        IO.puts("here")
+        packet_size = byte_size(packet)
+        buffer_size = packet_size + buffer_size
 
-      {:error, error, packets} ->
+        start = buffer_size - size
+        length = packet_size - start
+        buffer = binary_part(packet, start, length)
+
+        handle_packets(packets, state, %{data | buffer: buffer, buffer_size: length})
+
+      {:error, error, packets, _} ->
         case handle_packets(packets, state, data) do
           {_, _, actions} -> {:stop_and_reply, error, actions}
           {_, _} -> {:stop, error}
@@ -171,14 +185,19 @@ defmodule StarflareClient.Connection do
       packet_identifiers: packet_identifiers
     } = data
 
-    [packet_identifier | packet_identifiers] = packet_identifiers
-    :ets.insert_new(tracking_table, {packet_identifier, from})
+    case packet_identifiers do
+      [] ->
+        {:keep_state_and_data, {:reply, from, {:error, :no_identifiers_available}}}
 
-    publish = %{publish | packet_identifier: packet_identifier}
-    data = %{data | packet_identifiers: packet_identifiers}
+      [packet_identifier | packet_identifiers] ->
+        :ets.insert_new(tracking_table, {packet_identifier, from})
 
-    with :ok <- send_packet(transport, socket, publish) do
-      {:keep_state, data}
+        publish = %{publish | packet_identifier: packet_identifier}
+        data = %{data | packet_identifiers: packet_identifiers}
+
+        with :ok <- send_packet(transport, socket, publish) do
+          {:keep_state, data}
+        end
     end
   end
 
@@ -211,13 +230,17 @@ defmodule StarflareClient.Connection do
 
     %__MODULE__{connect: connect} = data
 
+    keep_alive = Keyword.get(properties, :server_keep_alive, connect.keep_alive)
+    clientid = Keyword.get(properties, :assigned_client_identifier, connect.clientid)
+    receive_maximum = Keyword.get(properties, :receive_maximum, 0xFFFF)
+
     connect =
       connect
-      |> Map.put(:keep_alive, Map.get(properties, :server_keep_alive, connect.keep_alive))
-      |> Map.put(:clientid, Map.get(properties, :assigned_client_identifier, connect.clientid))
+      |> Map.put(:keep_alive, keep_alive)
+      |> Map.put(:clientid, clientid)
       |> Map.put(:clean_start, false)
 
-    packet_identifiers = 1..Map.get(properties, :receive_maximum, 0xFFFF) |> Enum.into([])
+    packet_identifiers = Enum.into(1..receive_maximum, [])
 
     data = %{data | connect: connect, packet_identifiers: packet_identifiers}
 
