@@ -30,7 +30,7 @@ defmodule StarflareClient do
       properties: opts
     }
 
-    Connection.send_request(pid, {:send, publish})
+    Connection.call(pid, {:send, publish})
   end
 
   defp get_protocol("mqtts://" <> host) do
