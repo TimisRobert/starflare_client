@@ -28,6 +28,18 @@ defmodule StarflareClient do
     Connection.call(pid, {:send, publish})
   end
 
+  def subscribe(pid, topic_filters, opts \\ []) do
+    subscribe = create_subscribe(topic_filters, opts)
+    Connection.call(pid, {:send, subscribe})
+  end
+
+  defp create_subscribe(topic_filters, opts) do
+    %ControlPacket.Subscribe{
+      topic_filters: topic_filters,
+      properties: opts
+    }
+  end
+
   defp create_publish(topic_name, payload, opts) do
     {qos_level, opts} = Keyword.pop(opts, :qos_level, :at_least_once)
     {retain, opts} = Keyword.pop(opts, :retain, false)
