@@ -48,8 +48,4 @@ defmodule StarflareClient do
   defp get_protocol("mqtt://" <> host) do
     {:ok, Transport.Tcp, to_charlist(host), 1883}
   end
-
-  defp get_protocol(host) do
-    {:ok, Transport.Tcp, to_charlist(host), nil}
-  end
 end
