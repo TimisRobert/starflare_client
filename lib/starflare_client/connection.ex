@@ -104,16 +104,16 @@ defmodule StarflareClient.Connection do
 
   def handle_event(:internal, {:send, packet, nil}, {:connected, _}, data) do
     case send_packet(data, packet) do
-      :ok -> :keep_state_and_data
-      {:encoding_error, _error} -> :keep_state_and_data
+      :ok -> :repeat_state_and_data
+      {:encoding_error, _error} -> :repeat_state_and_data
       {:connection_error, _error} -> {:next_state, :disconnected, data, :postpone}
     end
   end
 
   def handle_event(:internal, {:send, packet, from}, {:connected, _}, data) do
     case send_packet(data, packet) do
-      :ok -> {:keep_state_and_data, {:reply, from, :ok}}
-      {:encoding_error, error} -> {:keep_state_and_data, {:reply, from, {:error, error}}}
+      :ok -> {:repeat_state_and_data, {:reply, from, :ok}}
+      {:encoding_error, error} -> {:repeat_state_and_data, {:reply, from, {:error, error}}}
       {:connection_error, _error} -> {:next_state, :disconnected, data, :postpone}
     end
   end
@@ -131,7 +131,9 @@ defmodule StarflareClient.Connection do
   end
 
   def handle_event(:timeout, :ping, {:connected, :normal}, data) do
-    case send_packet(data, %ControlPacket.Pingreq{}) do
+    {:ok, pingreq} = ControlPacket.Pingreq.new()
+
+    case send_packet(data, pingreq) do
       :ok -> {:next_state, {:connected, :heartbeat}, data}
       {:encoding_error, error} -> {:stop, error}
       {:connection_error, _error} -> {:next_state, :disconnected, data}
@@ -363,8 +365,7 @@ defmodule StarflareClient.Connection do
 
     [{^packet_identifier, from}] = :ets.lookup(tracking_table, packet_identifier)
 
-    pubrel = %ControlPacket.Pubrel{packet_identifier: packet_identifier}
-
+    {:ok, pubrel} = ControlPacket.Pubrel.new(packet_identifier: packet_identifier)
     {:ok, data, {:next_event, :internal, {:send, pubrel, from}}}
   end
 
@@ -380,10 +381,7 @@ defmodule StarflareClient.Connection do
 
     [{^packet_identifier, nil}] = :ets.take(tracking_table, packet_identifier)
 
-    pubcomp = %ControlPacket.Pubcomp{
-      packet_identifier: packet_identifier
-    }
-
+    {:ok, pubcomp} = ControlPacket.Pubcomp.new(packet_identifier: packet_identifier)
     {:ok, data, {:next_event, :internal, {:send, pubcomp, nil}}}
   end
 
@@ -484,19 +482,12 @@ defmodule StarflareClient.Connection do
         {:ok, data}
 
       :at_least_once ->
-        puback = %ControlPacket.Puback{
-          packet_identifier: packet_identifier
-        }
-
+        {:ok, puback} = ControlPacket.Puback.new(packet_identifier: packet_identifier)
         {:ok, data, {:next_event, :internal, {:send, puback, nil}}}
 
       :exactly_once ->
-        pubrec = %ControlPacket.Pubrec{
-          packet_identifier: packet_identifier
-        }
-
+        {:ok, pubrec} = ControlPacket.Pubrec.new(packet_identifier: packet_identifier)
         :ets.insert_new(tracking_table, {packet_identifier, nil})
-
         {:ok, data, {:next_event, :internal, {:send, pubrec, nil}}}
     end
   end

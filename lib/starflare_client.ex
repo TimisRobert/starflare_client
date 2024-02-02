@@ -5,64 +5,40 @@ defmodule StarflareClient do
 
   def connect(uri, opts \\ []) do
     {:ok, transport, host, port} = get_protocol(uri)
-
     {port, opts} = Keyword.pop(opts, :port, port)
 
-    connect = struct(ControlPacket.Connect, opts)
-
-    Connection.start_link(
-      connect: connect,
-      transport: transport,
-      host: host,
-      port: port
-    )
+    with {:ok, connect} <- ControlPacket.Connect.new(opts) do
+      Connection.start_link(
+        connect: connect,
+        transport: transport,
+        host: host,
+        port: port
+      )
+    end
   end
 
   def async_publish(pid, topic_name, payload, opts \\ []) do
-    publish = create_publish(topic_name, payload, opts)
-    Connection.send_request(pid, {:send, publish})
+    with {:ok, publish} <- ControlPacket.Publish.new(topic_name, payload, opts) do
+      Connection.send_request(pid, {:send, publish})
+    end
   end
 
   def publish(pid, topic_name, payload, opts \\ []) do
-    publish = create_publish(topic_name, payload, opts)
-    Connection.call(pid, {:send, publish})
+    with {:ok, publish} <- ControlPacket.Publish.new(topic_name, payload, opts) do
+      Connection.call(pid, {:send, publish})
+    end
   end
 
   def subscribe(pid, topic_filters, opts \\ []) do
-    subscribe = create_subscribe(topic_filters, opts)
-    Connection.call(pid, {:send, subscribe})
+    with {:ok, subscribe} <- ControlPacket.Subscribe.new(topic_filters, opts) do
+      Connection.call(pid, {:send, subscribe})
+    end
   end
 
   def unsubscribe(pid, topic_filters, opts \\ []) do
-    unsubscribe = create_unsubscribe(topic_filters, opts)
-    Connection.call(pid, {:send, unsubscribe})
-  end
-
-  defp create_unsubscribe(topic_filters, opts) do
-    %ControlPacket.Unsubscribe{
-      topic_filters: topic_filters,
-      properties: opts
-    }
-  end
-
-  defp create_subscribe(topic_filters, opts) do
-    %ControlPacket.Subscribe{
-      topic_filters: topic_filters,
-      properties: opts
-    }
-  end
-
-  defp create_publish(topic_name, payload, opts) do
-    {qos_level, opts} = Keyword.pop(opts, :qos_level, :at_least_once)
-    {retain, opts} = Keyword.pop(opts, :retain, false)
-
-    %ControlPacket.Publish{
-      topic_name: topic_name,
-      payload: payload,
-      qos_level: qos_level,
-      retain: retain,
-      properties: opts
-    }
+    with {:ok, unsubscribe} <- ControlPacket.Unsubscribe.new(topic_filters, opts) do
+      Connection.call(pid, {:send, unsubscribe})
+    end
   end
 
   defp get_protocol("mqtts://" <> host) do
