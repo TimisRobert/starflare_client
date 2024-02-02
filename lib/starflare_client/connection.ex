@@ -144,7 +144,8 @@ defmodule StarflareClient.Connection do
     {:next_state, :disconnected, data}
   end
 
-  def handle_event(:info, {:tcp, socket, packet}, state, %{socket: socket} = data) do
+  def handle_event(:info, {proto, socket, packet}, state, %{socket: socket} = data)
+      when proto in [:tcp, :ssl] do
     %__MODULE__{
       buffer: buffer,
       buffer_size: buffer_size,
@@ -206,7 +207,7 @@ defmodule StarflareClient.Connection do
         publish = %{publish | packet_identifier: packet_identifier}
         data = %{data | packet_identifiers: packet_identifiers}
 
-        {:keep_state, data, {:next_event, :internal, {:send, publish, from}}}
+        {:keep_state, data, {:next_event, :internal, {:send, publish, nil}}}
     end
   end
 
@@ -238,7 +239,7 @@ defmodule StarflareClient.Connection do
         subscribe = %{subscribe | packet_identifier: packet_identifier}
         data = %{data | packet_identifiers: packet_identifiers}
 
-        {:keep_state, data, {:next_event, :internal, {:send, subscribe, from}}}
+        {:keep_state, data, {:next_event, :internal, {:send, subscribe, nil}}}
     end
   end
 
