@@ -53,8 +53,10 @@ defmodule StarflareClient.Connection do
     {:keep_state_and_data, {:state_timeout, 0, :connect}}
   end
 
-  def handle_event(:enter, _state, :disconnected, _data) do
-    {:keep_state_and_data, {:state_timeout, :timer.seconds(1), :connect}}
+  def handle_event(:enter, _state, :disconnected, data) do
+    %__MODULE__{socket: socket, transport: transport} = data
+    transport.close(socket)
+    {:keep_state, data, {:state_timeout, :timer.seconds(1), :connect}}
   end
 
   def handle_event(:enter, :disconnected, :connecting, _) do
@@ -82,9 +84,17 @@ defmodule StarflareClient.Connection do
 
     case transport.connect(host, port, opts) do
       {:ok, socket} ->
-        with :ok <- send_packet(transport, socket, connect) do
-          data = %{data | socket: socket}
-          {:next_state, :connecting, data}
+        data = %{data | socket: socket}
+
+        case send_packet(data, connect) do
+          :ok ->
+            {:next_state, :connecting, data}
+
+          {:encoding_error, error} ->
+            {:stop, error}
+
+          {:connection_error, _error} ->
+            {:next_state, :disconnected, data}
         end
 
       _ ->
@@ -92,28 +102,44 @@ defmodule StarflareClient.Connection do
     end
   end
 
+  def handle_event(:internal, {:send, packet, nil}, {:connected, _}, data) do
+    case send_packet(data, packet) do
+      :ok -> :keep_state_and_data
+      {:encoding_error, _error} -> :keep_state_and_data
+      {:connection_error, _error} -> {:next_state, :disconnected, data, :postpone}
+    end
+  end
+
+  def handle_event(:internal, {:send, packet, from}, {:connected, _}, data) do
+    case send_packet(data, packet) do
+      :ok -> {:keep_state_and_data, {:reply, from, :ok}}
+      {:encoding_error, error} -> {:keep_state_and_data, {:reply, from, {:error, error}}}
+      {:connection_error, _error} -> {:next_state, :disconnected, data, :postpone}
+    end
+  end
+
+  def handle_event(:internal, {:send, _, _}, _state, _data) do
+    {:keep_state_and_data, :postpone}
+  end
+
   def handle_event(:state_timeout, :connect, :disconnected, data) do
     {:next_state, :connecting, data, {:next_event, :internal, :connect}}
   end
 
   def handle_event(:state_timeout, :disconnect, _, data) do
-    %__MODULE__{socket: socket, transport: transport} = data
-
-    transport.close(socket)
-
-    {:next_state, :disconnected, %{data | socket: nil}}
+    {:next_state, :disconnected, data}
   end
 
   def handle_event(:timeout, :ping, {:connected, :normal}, data) do
-    %__MODULE__{socket: socket, transport: transport} = data
-
-    with :ok <- send_packet(transport, socket, %ControlPacket.Pingreq{}) do
-      {:next_state, {:connected, :heartbeat}, data}
+    case send_packet(data, %ControlPacket.Pingreq{}) do
+      :ok -> {:next_state, {:connected, :heartbeat}, data}
+      {:encoding_error, error} -> {:stop, error}
+      {:connection_error, _error} -> {:next_state, :disconnected, data}
     end
   end
 
   def handle_event(:info, {:tcp_closed, socket}, {:connected, _}, %{socket: socket} = data) do
-    {:next_state, :disconnected, %{data | socket: nil}}
+    {:next_state, :disconnected, data}
   end
 
   def handle_event(:info, {:tcp, socket, packet}, state, %{socket: socket} = data) do
@@ -152,16 +178,9 @@ defmodule StarflareClient.Connection do
         {:call, from},
         {:send, %ControlPacket.Publish{qos_level: :at_most_once} = publish},
         {:connected, :normal},
-        data
+        _data
       ) do
-    %__MODULE__{
-      socket: socket,
-      transport: transport
-    } = data
-
-    with :ok <- send_packet(transport, socket, publish) do
-      {:keep_state_and_data, {:reply, from, :ok}}
-    end
+    {:keep_state_and_data, {:next_event, :internal, {:send, publish, from}}}
   end
 
   def handle_event(
@@ -171,8 +190,6 @@ defmodule StarflareClient.Connection do
         data
       ) do
     %__MODULE__{
-      socket: socket,
-      transport: transport,
       tracking_table: tracking_table,
       packet_identifiers: packet_identifiers
     } = data
@@ -187,9 +204,7 @@ defmodule StarflareClient.Connection do
         publish = %{publish | packet_identifier: packet_identifier}
         data = %{data | packet_identifiers: packet_identifiers}
 
-        with :ok <- send_packet(transport, socket, publish) do
-          {:keep_state, data}
-        end
+        {:keep_state, data, {:next_event, :internal, {:send, publish, from}}}
     end
   end
 
@@ -200,8 +215,6 @@ defmodule StarflareClient.Connection do
         data
       ) do
     %__MODULE__{
-      socket: socket,
-      transport: transport,
       tracking_table: tracking_table,
       subscription_table: subscription_table,
       packet_identifiers: packet_identifiers
@@ -217,14 +230,44 @@ defmodule StarflareClient.Connection do
 
       [packet_identifier | packet_identifiers] ->
         :ets.insert_new(tracking_table, {packet_identifier, from})
+        topic_filters = Enum.map(topic_filters, fn {topic_name, _} -> topic_name end)
         :ets.insert_new(subscription_table, {packet_identifier, topic_filters})
 
         subscribe = %{subscribe | packet_identifier: packet_identifier}
         data = %{data | packet_identifiers: packet_identifiers}
 
-        with :ok <- send_packet(transport, socket, subscribe) do
-          {:keep_state, data}
-        end
+        {:keep_state, data, {:next_event, :internal, {:send, subscribe, from}}}
+    end
+  end
+
+  def handle_event(
+        {:call, from},
+        {:send, %ControlPacket.Unsubscribe{} = unsubscribe},
+        {:connected, :normal},
+        data
+      ) do
+    %__MODULE__{
+      tracking_table: tracking_table,
+      subscription_table: subscription_table,
+      packet_identifiers: packet_identifiers
+    } = data
+
+    %ControlPacket.Unsubscribe{
+      topic_filters: topic_filters
+    } = unsubscribe
+
+    case packet_identifiers do
+      [] ->
+        {:next_state, {:connected, :out_of_identifiers}, data, :postpone}
+
+      [packet_identifier | packet_identifiers] ->
+        :ets.insert_new(tracking_table, {packet_identifier, from})
+        :ets.insert_new(subscription_table, {packet_identifier, topic_filters})
+
+        unsubscribe = %{unsubscribe | packet_identifier: packet_identifier}
+        data = %{data | packet_identifiers: packet_identifiers}
+
+        {:keep_state, data, {:next_event, :internal, {:send, unsubscribe, from}}}
     end
   end
 
@@ -315,17 +358,14 @@ defmodule StarflareClient.Connection do
     } = pubrec
 
     %__MODULE__{
-      transport: transport,
-      socket: socket
+      tracking_table: tracking_table
     } = data
 
-    # [{^packet_identifier, from}] = :ets.take(tracking_table, packet_identifier)
+    [{^packet_identifier, from}] = :ets.lookup(tracking_table, packet_identifier)
 
     pubrel = %ControlPacket.Pubrel{packet_identifier: packet_identifier}
 
-    with :ok <- send_packet(transport, socket, pubrel) do
-      {:ok, data}
-    end
+    {:ok, data, {:next_event, :internal, {:send, pubrel, from}}}
   end
 
   defp handle_packet(%ControlPacket.Pubrel{} = pubrel, {:connected, _}, data) do
@@ -335,8 +375,6 @@ defmodule StarflareClient.Connection do
     } = pubrel
 
     %__MODULE__{
-      transport: transport,
-      socket: socket,
       tracking_table: tracking_table
     } = data
 
@@ -346,9 +384,7 @@ defmodule StarflareClient.Connection do
       packet_identifier: packet_identifier
     }
 
-    with :ok <- send_packet(transport, socket, pubcomp) do
-      {:ok, data}
-    end
+    {:ok, data, {:next_event, :internal, {:send, pubcomp, nil}}}
   end
 
   defp handle_packet(%ControlPacket.Pubcomp{} = pubcomp, {:connected, _}, data) do
@@ -390,8 +426,35 @@ defmodule StarflareClient.Connection do
         reason_code in [:granted_qos_0, :granted_qos_1, :granted_qos_2]
       end)
 
-    for {_, {topic_name, _}} <- accepted_topic_filters do
+    for {_, topic_name} <- accepted_topic_filters do
       :ets.insert(subscription_table, {topic_name, pid})
+    end
+
+    {:ok, data, {:reply, from, {:ok, accepted_topic_filters, rejected_topic_filters}}}
+  end
+
+  defp handle_packet(%ControlPacket.Unsuback{} = unsuback, {:connected, _}, data) do
+    %ControlPacket.Unsuback{
+      packet_identifier: packet_identifier,
+      reason_codes: reason_codes
+    } = unsuback
+
+    %__MODULE__{
+      tracking_table: tracking_table,
+      subscription_table: subscription_table,
+      packet_identifiers: packet_identifiers
+    } = data
+
+    [{^packet_identifier, from}] = :ets.take(tracking_table, packet_identifier)
+    [{^packet_identifier, topic_filters}] = :ets.take(subscription_table, packet_identifier)
+    data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
+
+    {accepted_topic_filters, rejected_topic_filters} =
+      Enum.zip(reason_codes, topic_filters)
+      |> Enum.split_with(fn {reason_code, _} -> reason_code === :success end)
+
+    for {_, key} <- accepted_topic_filters do
+      :ets.delete(subscription_table, key)
     end
 
     {:ok, data, {:reply, from, {:ok, accepted_topic_filters, rejected_topic_filters}}}
@@ -407,8 +470,6 @@ defmodule StarflareClient.Connection do
 
     %__MODULE__{
       tracking_table: tracking_table,
-      transport: transport,
-      socket: socket,
       subscription_table: subscription_table
     } = data
 
@@ -427,9 +488,7 @@ defmodule StarflareClient.Connection do
           packet_identifier: packet_identifier
         }
 
-        with :ok <- send_packet(transport, socket, puback) do
-          {:ok, data}
-        end
+        {:ok, data, {:next_event, :internal, {:send, puback, nil}}}
 
       :exactly_once ->
         pubrec = %ControlPacket.Pubrec{
@@ -438,15 +497,25 @@ defmodule StarflareClient.Connection do
 
         :ets.insert_new(tracking_table, {packet_identifier, nil})
 
-        with :ok <- send_packet(transport, socket, pubrec) do
-          {:ok, data}
-        end
+        {:ok, data, {:next_event, :internal, {:send, pubrec, nil}}}
     end
   end
 
-  defp send_packet(transport, socket, packet) do
-    with {:ok, packet, _size} <- ControlPacket.encode(packet) do
-      transport.send(socket, packet)
+  defp send_packet(data, packet) do
+    %__MODULE__{
+      transport: transport,
+      socket: socket
+    } = data
+
+    case ControlPacket.encode(packet) do
+      {:ok, packet, _size} ->
+        case transport.send(socket, packet) do
+          :ok -> :ok
+          error -> {:connection_error, error}
+        end
+
+      error ->
+        {:encoding_error, error}
     end
   end
 end

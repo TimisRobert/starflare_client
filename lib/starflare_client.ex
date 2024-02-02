@@ -33,6 +33,18 @@ defmodule StarflareClient do
     Connection.call(pid, {:send, subscribe})
   end
 
+  def unsubscribe(pid, topic_filters, opts \\ []) do
+    unsubscribe = create_unsubscribe(topic_filters, opts)
+    Connection.call(pid, {:send, unsubscribe})
+  end
+
+  defp create_unsubscribe(topic_filters, opts) do
+    %ControlPacket.Unsubscribe{
+      topic_filters: topic_filters,
+      properties: opts
+    }
+  end
+
   defp create_subscribe(topic_filters, opts) do
     %ControlPacket.Subscribe{
       topic_filters: topic_filters,
