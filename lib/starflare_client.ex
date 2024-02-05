@@ -8,11 +8,9 @@ defmodule StarflareClient do
     {port, opts} = Keyword.pop(opts, :port, port)
 
     with {:ok, connect} <- ControlPacket.Connect.new(opts) do
-      Connection.start_link(
-        connect: connect,
-        transport: transport,
-        host: host,
-        port: port
+      DynamicSupervisor.start_child(
+        StarflareClient.DynamicSupervisor,
+        {Connection, connect: connect, transport: transport, host: host, port: port}
       )
     end
   end

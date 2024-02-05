@@ -18,6 +18,13 @@ defmodule StarflareClient.Connection do
             tracker_table: nil,
             subscription_table: nil
 
+  def child_spec(init_arg) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [init_arg]}
+    }
+  end
+
   def start_link(opts) do
     {connect, opts} = Keyword.pop!(opts, :connect)
     {transport, opts} = Keyword.pop!(opts, :transport)
@@ -274,7 +281,7 @@ defmodule StarflareClient.Connection do
         Tracker.insert(tracker_table, unsubscribe, from)
 
         data = %{data | packet_identifiers: packet_identifiers}
-        {:keep_state, data, {:next_event, :internal, {:send, unsubscribe, from}}}
+        {:keep_state, data, {:next_event, :internal, {:send, unsubscribe}}}
     end
   end
 
@@ -344,7 +351,7 @@ defmodule StarflareClient.Connection do
   defp handle_packet(%ControlPacket.Puback{} = puback, {:connected, _}, data) do
     %ControlPacket.Puback{
       packet_identifier: packet_identifier,
-      reason_code: _reason_code
+      reason_code: reason_code
     } = puback
 
     %__MODULE__{
@@ -355,23 +362,34 @@ defmodule StarflareClient.Connection do
     [{^packet_identifier, _, from}] = Tracker.take(tracker_table, packet_identifier)
     data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
 
-    {:ok, data, {:reply, from, :ok}}
+    if reason_code === :success do
+      {:ok, data, {:reply, from, :ok}}
+    else
+      {:ok, data, {:reply, from, {:error, reason_code}}}
+    end
   end
 
   defp handle_packet(%ControlPacket.Pubrec{} = pubrec, {:connected, _}, data) do
     %ControlPacket.Pubrec{
       packet_identifier: packet_identifier,
-      reason_code: _reason_code
+      reason_code: reason_code
     } = pubrec
 
     %__MODULE__{
-      tracker_table: tracker_table
+      tracker_table: tracker_table,
+      packet_identifiers: packet_identifiers
     } = data
 
     [{^packet_identifier, _, from}] = Tracker.lookup(tracker_table, packet_identifier)
 
-    {:ok, pubrel} = ControlPacket.Pubrel.new(packet_identifier: packet_identifier)
-    {:ok, data, {:next_event, :internal, {:send, pubrel, from}}}
+    if reason_code === :success do
+      {:ok, pubrel} = ControlPacket.Pubrel.new(packet_identifier: packet_identifier)
+      {:ok, data, {:next_event, :internal, {:send, pubrel}}}
+    else
+      Tracker.delete(tracker_table, packet_identifier)
+      data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
+      {:ok, data, {:reply, from, {:error, reason_code}}}
+    end
   end
 
   defp handle_packet(%ControlPacket.Pubrel{} = pubrel, {:connected, _}, data) do
@@ -393,7 +411,7 @@ defmodule StarflareClient.Connection do
   defp handle_packet(%ControlPacket.Pubcomp{} = pubcomp, {:connected, _}, data) do
     %ControlPacket.Pubcomp{
       packet_identifier: packet_identifier,
-      reason_code: _reason_code
+      reason_code: reason_code
     } = pubcomp
 
     %__MODULE__{
@@ -404,7 +422,11 @@ defmodule StarflareClient.Connection do
     [{^packet_identifier, _, from}] = Tracker.take(tracker_table, packet_identifier)
     data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
 
-    {:ok, data, {:reply, from, :ok}}
+    if reason_code === :success do
+      {:ok, data, {:reply, from, :ok}}
+    else
+      {:ok, data, {:reply, from, {:error, reason_code}}}
+    end
   end
 
   defp handle_packet(%ControlPacket.Suback{} = suback, {:connected, _}, data) do
@@ -475,10 +497,8 @@ defmodule StarflareClient.Connection do
       subscription_table: subscription_table
     } = data
 
-    subscribers = Subscription.find_matching(subscription_table, topic_name)
-
-    for from <- subscribers do
-      send(from, payload)
+    for from <- Subscription.find_matching(subscription_table, topic_name) do
+      send(from, {topic_name, payload})
     end
 
     case qos_level do
@@ -496,17 +516,16 @@ defmodule StarflareClient.Connection do
     end
   end
 
-  defp handle_packet(%ControlPacket.Disconnect{} = disconnect, {:connected, _}, data) do
+  defp handle_packet(%ControlPacket.Disconnect{} = disconnect, {:connected, _}, _data) do
     %ControlPacket.Disconnect{
       reason_code: reason_code,
       properties: properties
     } = disconnect
 
     reason_string = Keyword.get(properties, :reason_string, "unknown")
-
     Logger.info("Client disconnected, code: #{reason_code}, reason: #{reason_string}")
 
-    {:ok, {:next_state, :disconnected, data}}
+    {:ok, {:stop, reason_code}}
   end
 
   defp send_packet(data, packet) do

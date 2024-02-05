@@ -2,7 +2,7 @@ defmodule StarflareClient.Subscription do
   @moduledoc false
 
   def new() do
-    :ets.new(:subscription_table, [:private, :duplicate_bag])
+    :ets.new(:subscription_table, [:duplicate_bag])
   end
 
   def insert_new(table, topic_name, from) do
