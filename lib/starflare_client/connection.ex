@@ -1,6 +1,8 @@
 defmodule StarflareClient.Connection do
   @moduledoc false
 
+  alias StarflareClient.Subscription
+  alias StarflareClient.Tracker
   require Logger
 
   @behaviour :gen_statem
@@ -13,7 +15,7 @@ defmodule StarflareClient.Connection do
             buffer: [],
             buffer_size: 0,
             packet_identifiers: [],
-            tracking_table: nil,
+            tracker_table: nil,
             subscription_table: nil
 
   def start_link(opts) do
@@ -41,9 +43,9 @@ defmodule StarflareClient.Connection do
 
   @impl true
   def init(data) do
-    tracking_table = :ets.new(:tracking_table, [:private, :duplicate_bag])
-    subscription_table = :ets.new(:subscription_table, [:private, :duplicate_bag])
-    data = %{data | tracking_table: tracking_table, subscription_table: subscription_table}
+    tracker_table = Tracker.new()
+    subscription_table = Subscription.new()
+    data = %{data | tracker_table: tracker_table, subscription_table: subscription_table}
 
     {:ok, :disconnected, data}
   end
@@ -102,7 +104,7 @@ defmodule StarflareClient.Connection do
     end
   end
 
-  def handle_event(:internal, {:send, packet, nil}, {:connected, _}, data) do
+  def handle_event(:internal, {:send, packet}, {:connected, _}, data) do
     case send_packet(data, packet) do
       :ok -> :repeat_state_and_data
       {:encoding_error, _error} -> :repeat_state_and_data
@@ -141,6 +143,10 @@ defmodule StarflareClient.Connection do
   end
 
   def handle_event(:info, {:tcp_closed, socket}, {:connected, _}, %{socket: socket} = data) do
+    {:next_state, :disconnected, data}
+  end
+
+  def handle_event(:info, {:ssl_closed, _, socket}, {:connected, _}, %{socket: socket} = data) do
     {:next_state, :disconnected, data}
   end
 
@@ -193,7 +199,7 @@ defmodule StarflareClient.Connection do
         data
       ) do
     %__MODULE__{
-      tracking_table: tracking_table,
+      tracker_table: tracker_table,
       packet_identifiers: packet_identifiers
     } = data
 
@@ -202,23 +208,22 @@ defmodule StarflareClient.Connection do
         {:next_state, {:connected, :out_of_identifiers}, data, :postpone}
 
       [packet_identifier | packet_identifiers] ->
-        :ets.insert_new(tracking_table, {packet_identifier, from})
-
         publish = %{publish | packet_identifier: packet_identifier}
-        data = %{data | packet_identifiers: packet_identifiers}
+        Tracker.insert(tracker_table, publish, from)
 
-        {:keep_state, data, {:next_event, :internal, {:send, publish, nil}}}
+        data = %{data | packet_identifiers: packet_identifiers}
+        {:keep_state, data, {:next_event, :internal, {:send, publish}}}
     end
   end
 
   def handle_event(
-        {:call, from},
+        {:call, {pid, _} = from},
         {:send, %ControlPacket.Subscribe{} = subscribe},
         {:connected, :normal},
         data
       ) do
     %__MODULE__{
-      tracking_table: tracking_table,
+      tracker_table: tracker_table,
       subscription_table: subscription_table,
       packet_identifiers: packet_identifiers
     } = data
@@ -232,14 +237,20 @@ defmodule StarflareClient.Connection do
         {:next_state, {:connected, :out_of_identifiers}, data, :postpone}
 
       [packet_identifier | packet_identifiers] ->
-        :ets.insert_new(tracking_table, {packet_identifier, from})
-        topic_filters = Enum.map(topic_filters, fn {topic_name, _} -> topic_name end)
-        :ets.insert_new(subscription_table, {packet_identifier, topic_filters})
+        results =
+          for {topic_name, _} <- topic_filters do
+            Subscription.insert_new(subscription_table, topic_name, pid)
+          end
 
-        subscribe = %{subscribe | packet_identifier: packet_identifier}
-        data = %{data | packet_identifiers: packet_identifiers}
+        if Enum.all?(results, &Function.identity/1) do
+          subscribe = %{subscribe | packet_identifier: packet_identifier}
+          Tracker.insert(tracker_table, subscribe, from)
 
-        {:keep_state, data, {:next_event, :internal, {:send, subscribe, nil}}}
+          data = %{data | packet_identifiers: packet_identifiers}
+          {:keep_state, data, {:next_event, :internal, {:send, subscribe}}}
+        else
+          {:keep_state, data, {:reply, from, {:error, :already_subscribed}}}
+        end
     end
   end
 
@@ -250,26 +261,19 @@ defmodule StarflareClient.Connection do
         data
       ) do
     %__MODULE__{
-      tracking_table: tracking_table,
-      subscription_table: subscription_table,
+      tracker_table: tracker_table,
       packet_identifiers: packet_identifiers
     } = data
-
-    %ControlPacket.Unsubscribe{
-      topic_filters: topic_filters
-    } = unsubscribe
 
     case packet_identifiers do
       [] ->
         {:next_state, {:connected, :out_of_identifiers}, data, :postpone}
 
       [packet_identifier | packet_identifiers] ->
-        :ets.insert_new(tracking_table, {packet_identifier, from})
-        :ets.insert_new(subscription_table, {packet_identifier, topic_filters})
-
         unsubscribe = %{unsubscribe | packet_identifier: packet_identifier}
-        data = %{data | packet_identifiers: packet_identifiers}
+        Tracker.insert(tracker_table, unsubscribe, from)
 
+        data = %{data | packet_identifiers: packet_identifiers}
         {:keep_state, data, {:next_event, :internal, {:send, unsubscribe, from}}}
     end
   end
@@ -344,11 +348,11 @@ defmodule StarflareClient.Connection do
     } = puback
 
     %__MODULE__{
-      tracking_table: tracking_table,
+      tracker_table: tracker_table,
       packet_identifiers: packet_identifiers
     } = data
 
-    [{^packet_identifier, from}] = :ets.take(tracking_table, packet_identifier)
+    [{^packet_identifier, _, from}] = Tracker.take(tracker_table, packet_identifier)
     data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
 
     {:ok, data, {:reply, from, :ok}}
@@ -361,10 +365,10 @@ defmodule StarflareClient.Connection do
     } = pubrec
 
     %__MODULE__{
-      tracking_table: tracking_table
+      tracker_table: tracker_table
     } = data
 
-    [{^packet_identifier, from}] = :ets.lookup(tracking_table, packet_identifier)
+    [{^packet_identifier, _, from}] = Tracker.lookup(tracker_table, packet_identifier)
 
     {:ok, pubrel} = ControlPacket.Pubrel.new(packet_identifier: packet_identifier)
     {:ok, data, {:next_event, :internal, {:send, pubrel, from}}}
@@ -377,13 +381,13 @@ defmodule StarflareClient.Connection do
     } = pubrel
 
     %__MODULE__{
-      tracking_table: tracking_table
+      tracker_table: tracker_table
     } = data
 
-    [{^packet_identifier, nil}] = :ets.take(tracking_table, packet_identifier)
+    [{^packet_identifier, _}] = Tracker.take(tracker_table, packet_identifier)
 
     {:ok, pubcomp} = ControlPacket.Pubcomp.new(packet_identifier: packet_identifier)
-    {:ok, data, {:next_event, :internal, {:send, pubcomp, nil}}}
+    {:ok, data, {:next_event, :internal, {:send, pubcomp}}}
   end
 
   defp handle_packet(%ControlPacket.Pubcomp{} = pubcomp, {:connected, _}, data) do
@@ -393,11 +397,11 @@ defmodule StarflareClient.Connection do
     } = pubcomp
 
     %__MODULE__{
-      tracking_table: tracking_table,
+      tracker_table: tracker_table,
       packet_identifiers: packet_identifiers
     } = data
 
-    [{^packet_identifier, from}] = :ets.take(tracking_table, packet_identifier)
+    [{^packet_identifier, _, from}] = Tracker.take(tracker_table, packet_identifier)
     data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
 
     {:ok, data, {:reply, from, :ok}}
@@ -410,14 +414,14 @@ defmodule StarflareClient.Connection do
     } = suback
 
     %__MODULE__{
-      tracking_table: tracking_table,
-      subscription_table: subscription_table,
+      tracker_table: tracker_table,
       packet_identifiers: packet_identifiers
     } = data
 
-    [{^packet_identifier, {pid, _} = from}] = :ets.take(tracking_table, packet_identifier)
-    [{^packet_identifier, topic_filters}] = :ets.take(subscription_table, packet_identifier)
-    data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
+    [{^packet_identifier, subscribe, from}] =
+      Tracker.take(tracker_table, packet_identifier)
+
+    %ControlPacket.Subscribe{topic_filters: topic_filters} = subscribe
 
     {accepted_topic_filters, rejected_topic_filters} =
       Enum.zip(reason_codes, topic_filters)
@@ -425,10 +429,7 @@ defmodule StarflareClient.Connection do
         reason_code in [:granted_qos_0, :granted_qos_1, :granted_qos_2]
       end)
 
-    for {_, topic_name} <- accepted_topic_filters do
-      :ets.insert(subscription_table, {topic_name, pid})
-    end
-
+    data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
     {:ok, data, {:reply, from, {:ok, accepted_topic_filters, rejected_topic_filters}}}
   end
 
@@ -439,23 +440,25 @@ defmodule StarflareClient.Connection do
     } = unsuback
 
     %__MODULE__{
-      tracking_table: tracking_table,
+      tracker_table: tracker_table,
       subscription_table: subscription_table,
       packet_identifiers: packet_identifiers
     } = data
 
-    [{^packet_identifier, from}] = :ets.take(tracking_table, packet_identifier)
-    [{^packet_identifier, topic_filters}] = :ets.take(subscription_table, packet_identifier)
-    data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
+    [{^packet_identifier, unsubscribe, {pid, _} = from}] =
+      Tracker.take(tracker_table, packet_identifier)
+
+    %ControlPacket.Unsubscribe{topic_filters: topic_filters} = unsubscribe
 
     {accepted_topic_filters, rejected_topic_filters} =
       Enum.zip(reason_codes, topic_filters)
       |> Enum.split_with(fn {reason_code, _} -> reason_code === :success end)
 
-    for {_, key} <- accepted_topic_filters do
-      :ets.delete(subscription_table, key)
+    for {_, topic_filter} <- accepted_topic_filters do
+      Subscription.delete(subscription_table, topic_filter, pid)
     end
 
+    data = %{data | packet_identifiers: [packet_identifier | packet_identifiers]}
     {:ok, data, {:reply, from, {:ok, accepted_topic_filters, rejected_topic_filters}}}
   end
 
@@ -468,13 +471,13 @@ defmodule StarflareClient.Connection do
     } = publish
 
     %__MODULE__{
-      tracking_table: tracking_table,
+      tracker_table: tracker_table,
       subscription_table: subscription_table
     } = data
 
-    subscribers = :ets.lookup(subscription_table, topic_name)
+    subscribers = Subscription.find_matching(subscription_table, topic_name)
 
-    for {_, from} <- subscribers do
+    for from <- subscribers do
       send(from, payload)
     end
 
@@ -484,13 +487,26 @@ defmodule StarflareClient.Connection do
 
       :at_least_once ->
         {:ok, puback} = ControlPacket.Puback.new(packet_identifier: packet_identifier)
-        {:ok, data, {:next_event, :internal, {:send, puback, nil}}}
+        {:ok, data, {:next_event, :internal, {:send, puback}}}
 
       :exactly_once ->
         {:ok, pubrec} = ControlPacket.Pubrec.new(packet_identifier: packet_identifier)
-        :ets.insert_new(tracking_table, {packet_identifier, nil})
-        {:ok, data, {:next_event, :internal, {:send, pubrec, nil}}}
+        Tracker.insert(tracker_table, pubrec)
+        {:ok, data, {:next_event, :internal, {:send, pubrec}}}
     end
+  end
+
+  defp handle_packet(%ControlPacket.Disconnect{} = disconnect, {:connected, _}, data) do
+    %ControlPacket.Disconnect{
+      reason_code: reason_code,
+      properties: properties
+    } = disconnect
+
+    reason_string = Keyword.get(properties, :reason_string, "unknown")
+
+    Logger.info("Client disconnected, code: #{reason_code}, reason: #{reason_string}")
+
+    {:ok, {:next_state, :disconnected, data}}
   end
 
   defp send_packet(data, packet) do
