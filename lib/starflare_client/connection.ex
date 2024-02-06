@@ -38,7 +38,8 @@ defmodule StarflareClient.Connection do
       port: port
     }
 
-    :gen_statem.start_link(__MODULE__, data, opts)
+    {name, opts} = Keyword.pop!(opts, :name)
+    :gen_statem.start_link(name, __MODULE__, data, opts)
   end
 
   defdelegate call(pid, term), to: :gen_statem
@@ -46,10 +47,23 @@ defmodule StarflareClient.Connection do
   defdelegate get_state(pid), to: :sys
 
   @impl true
+  def terminate(:shutdown, _state, data) do
+    %__MODULE__{socket: socket, transport: transport} = data
+    transport.close(socket)
+    :ok
+  end
+
+  def terminate(_reason, _state, _data) do
+    :ok
+  end
+
+  @impl true
   def callback_mode, do: [:handle_event_function, :state_enter]
 
   @impl true
   def init(data) do
+    Process.flag(:trap_exit, true)
+
     tracker_table = Tracker.new()
     subscription_table = Subscription.new()
     data = %{data | tracker_table: tracker_table, subscription_table: subscription_table}
@@ -60,6 +74,10 @@ defmodule StarflareClient.Connection do
   @impl true
   def handle_event(:enter, :disconnected, :disconnected, _data) do
     {:keep_state_and_data, {:state_timeout, 0, :connect}}
+  end
+
+  def handle_event(:enter, _, :terminating, _data) do
+    :keep_state_and_data
   end
 
   def handle_event(:enter, _state, :disconnected, data) do
@@ -106,8 +124,8 @@ defmodule StarflareClient.Connection do
             {:next_state, :disconnected, data}
         end
 
-      _ ->
-        {:next_state, :disconnected, data}
+      {:error, reason} ->
+        {:stop, reason, data}
     end
   end
 
@@ -149,11 +167,11 @@ defmodule StarflareClient.Connection do
     end
   end
 
-  def handle_event(:info, {:tcp_closed, socket}, {:connected, _}, %{socket: socket} = data) do
+  def handle_event(:info, {:tcp_closed, socket}, _, %{socket: socket} = data) do
     {:next_state, :disconnected, data}
   end
 
-  def handle_event(:info, {:ssl_closed, _, socket}, {:connected, _}, %{socket: socket} = data) do
+  def handle_event(:info, {:ssl_closed, socket}, _, %{socket: socket} = data) do
     {:next_state, :disconnected, data}
   end
 
@@ -282,6 +300,17 @@ defmodule StarflareClient.Connection do
 
         data = %{data | packet_identifiers: packet_identifiers}
         {:keep_state, data, {:next_event, :internal, {:send, unsubscribe}}}
+    end
+  end
+
+  def handle_event(
+        {:call, from},
+        {:send, %ControlPacket.Disconnect{} = disconnect},
+        {:connected, :normal},
+        data
+      ) do
+    with :ok <- send_packet(data, disconnect) do
+      {:next_state, :terminating, data, {:reply, from, :ok}}
     end
   end
 

@@ -5,7 +5,10 @@ defmodule StarflareClient.Application do
 
   @impl true
   def start(_type, _args) do
+    Logger.add_translator({StarflareClient.Translator, :translate})
+
     children = [
+      {Registry, keys: :unique, name: StarflareClient.Registry},
       {DynamicSupervisor, name: StarflareClient.DynamicSupervisor, strategy: :one_for_one}
     ]
 
