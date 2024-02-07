@@ -18,7 +18,4 @@ defmodule StarflareClient.Transport do
 
   @callback setopts(socket :: :inet.socket() | :ssl.sslsocket(), opts :: [:gen_tcp.option()]) ::
               :ok | {:error, :inet.posix()}
-
-  @callback controlling_process(socket :: :inet.socket() | :ssl.sslsocket(), owner :: pid()) ::
-              :ok | {:error, :closed | :not_owner | :badarg | :inet.posix()}
 end

@@ -158,7 +158,7 @@ defmodule StarflareClient.Connection do
   end
 
   def handle_event(:timeout, :ping, {:connected, :normal}, data) do
-    {:ok, pingreq} = ControlPacket.Pingreq.new()
+    pingreq = %ControlPacket.Pingreq{}
 
     case send_packet(data, pingreq) do
       :ok -> {:next_state, {:connected, :heartbeat}, data}
@@ -412,7 +412,7 @@ defmodule StarflareClient.Connection do
     [{^packet_identifier, _, from}] = Tracker.lookup(tracker_table, packet_identifier)
 
     if reason_code === :success do
-      {:ok, pubrel} = ControlPacket.Pubrel.new(packet_identifier: packet_identifier)
+      pubrel = %ControlPacket.Pubrel{packet_identifier: packet_identifier}
       {:ok, data, {:next_event, :internal, {:send, pubrel}}}
     else
       Tracker.delete(tracker_table, packet_identifier)
@@ -433,7 +433,7 @@ defmodule StarflareClient.Connection do
 
     [{^packet_identifier, _}] = Tracker.take(tracker_table, packet_identifier)
 
-    {:ok, pubcomp} = ControlPacket.Pubcomp.new(packet_identifier: packet_identifier)
+    pubcomp = %ControlPacket.Pubcomp{packet_identifier: packet_identifier}
     {:ok, data, {:next_event, :internal, {:send, pubcomp}}}
   end
 
@@ -535,11 +535,11 @@ defmodule StarflareClient.Connection do
         {:ok, data}
 
       :at_least_once ->
-        {:ok, puback} = ControlPacket.Puback.new(packet_identifier: packet_identifier)
+        puback = %ControlPacket.Puback{packet_identifier: packet_identifier}
         {:ok, data, {:next_event, :internal, {:send, puback}}}
 
       :exactly_once ->
-        {:ok, pubrec} = ControlPacket.Pubrec.new(packet_identifier: packet_identifier)
+        pubrec = %ControlPacket.Pubrec{packet_identifier: packet_identifier}
         Tracker.insert(tracker_table, pubrec)
         {:ok, data, {:next_event, :internal, {:send, pubrec}}}
     end

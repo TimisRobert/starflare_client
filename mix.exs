@@ -4,7 +4,7 @@ defmodule StarflareClient.MixProject do
   def project do
     [
       app: :starflare_client,
-      version: "0.1.1",
+      version: "0.2.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -26,7 +26,7 @@ defmodule StarflareClient.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:control_packet, "~> 1.0"},
+      {:control_packet, "~> 1.1"},
       {:castore, "~> 1.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

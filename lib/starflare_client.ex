@@ -10,8 +10,9 @@ defmodule StarflareClient do
 
     opts = Keyword.put_new_lazy(opts, :clientid, &random_clientid/0)
 
-    with {:ok, connect} <- ControlPacket.Connect.new(opts),
-         {:ok, _} <-
+    connect = struct!(ControlPacket.Connect, opts)
+
+    with {:ok, _} <-
            DynamicSupervisor.start_child(
              StarflareClient.DynamicSupervisor,
              {Connection,
@@ -26,36 +27,40 @@ defmodule StarflareClient do
   end
 
   def async_publish(name, topic_name, payload, opts \\ []) do
-    with {:ok, publish} <- ControlPacket.Publish.new(topic_name, payload, opts) do
-      Connection.send_request(via_tuple(name), {:send, publish})
-    end
+    opts = Keyword.merge(opts, topic_name: topic_name, payload: payload)
+    publish = struct!(ControlPacket.Publish, opts)
+    Connection.send_request(via_tuple(name), {:send, publish})
   end
 
   def publish(name, topic_name, payload, opts \\ []) do
-    with {:ok, publish} <- ControlPacket.Publish.new(topic_name, payload, opts) do
-      Connection.call(via_tuple(name), {:send, publish})
-    end
+    opts = Keyword.merge(opts, topic_name: topic_name, payload: payload)
+    publish = struct!(ControlPacket.Publish, opts)
+    Connection.call(via_tuple(name), {:send, publish})
   end
 
   def subscribe(name, topic_filters, opts \\ []) do
-    with {:ok, subscribe} <- ControlPacket.Subscribe.new(topic_filters, opts) do
-      Connection.call(via_tuple(name), {:send, subscribe})
-    end
+    topic_filters =
+      Enum.map(topic_filters, fn
+        topic_filter when is_tuple(topic_filter) -> topic_filter
+        topic_filter -> {topic_filter, []}
+      end)
+
+    opts = Keyword.merge(opts, topic_filters: topic_filters)
+    subscribe = struct!(ControlPacket.Subscribe, opts)
+    Connection.call(via_tuple(name), {:send, subscribe})
   end
 
   def unsubscribe(name, topic_filters, opts \\ []) do
-    with {:ok, unsubscribe} <- ControlPacket.Unsubscribe.new(topic_filters, opts) do
-      Connection.call(via_tuple(name), {:send, unsubscribe})
-    end
+    opts = Keyword.merge(opts, topic_filters: topic_filters)
+    unsubscribe = struct!(ControlPacket.Unsubscribe, opts)
+    Connection.call(via_tuple(name), {:send, unsubscribe})
   end
 
   def disconnect(name, opts \\ []) do
-    with {:ok, disconnect} <- ControlPacket.Disconnect.new(opts) do
-      Connection.call(via_tuple(name), {:send, disconnect})
-
-      [{pid, _}] = Registry.lookup(StarflareClient.Registry, name)
-      DynamicSupervisor.terminate_child(StarflareClient.DynamicSupervisor, pid)
-    end
+    disconnect = struct!(ControlPacket.Disconnect, opts)
+    Connection.call(via_tuple(name), {:send, disconnect})
+    [{pid, _}] = Registry.lookup(StarflareClient.Registry, name)
+    DynamicSupervisor.terminate_child(StarflareClient.DynamicSupervisor, pid)
   end
 
   defp get_protocol("mqtts://" <> host) do
