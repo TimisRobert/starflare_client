@@ -5,7 +5,7 @@ MQTT 5 Client library.
 ## Connection and disconnection
 
 ```elixir
-# For TLS connections
+# For TCP connections
 {:ok, name} = StarflareClient.connect("mqtt://broker.com")
 
 # For SSL connections
