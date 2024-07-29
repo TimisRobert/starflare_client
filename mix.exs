@@ -4,7 +4,7 @@ defmodule StarflareClient.MixProject do
   def project do
     [
       app: :starflare_client,
-      version: "0.2.0",
+      version: "0.2.1",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -36,7 +36,7 @@ defmodule StarflareClient.MixProject do
 
   defp package() do
     [
-      licenses: ["AGPL-3.0-or-later"],
+      licenses: ["MIT"],
       links: %{"GitHub" => "https://github.com/TimisRobert/starflare_client"}
     ]
   end

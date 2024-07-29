@@ -27,3 +27,7 @@ starflare_client-*.tar
 
 .direnv
 .devenv
+.lexical
+
+.devenv*
+devenv.local.nix
